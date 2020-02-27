@@ -2,7 +2,7 @@
 import re, sys
 from future.standard_library import install_aliases
 install_aliases()
-from urllib.parse import urlparse, urlencode
+from urllib.parse import urlparse, urlencode, urljoin
 from urllib.request import urlopen, build_opener
 from urllib.error import HTTPError
 try:
@@ -14,6 +14,7 @@ import logging
 
 from django.db import models
 from django.utils.translation import ugettext_lazy as _
+from django.core.exceptions import ValidationError
 
 from .webcall import MultipartPostHandler
 
@@ -133,11 +134,25 @@ class List(models.Model):
     encoding = models.CharField(max_length=20, choices=LANGUAGES)
 
     class Meta:
-        verbose_name = 'List-Installation'
-        verbose_name_plural = 'List-Installations'
+        verbose_name = 'mailinglist'
+        verbose_name_plural = 'mailinglists'
 
-    def __unicode__(self):
+    def __str__(self):
         return u'%s' % (self.name)
+
+    def clean(self):
+        try:
+            url = urljoin(self.main_url, 'admin/%s/members/list' % (self.name,))
+            data = {'adminpw': self.password}
+            opener = build_opener(MultipartPostHandler(self.encoding))
+            encoded_data = urlencode(data).encode(self.encoding)
+            content = opener.open(url, encoded_data).read()
+        except HTTPError as error:
+            raise ValidationError("Could not reach Listserver at %s: %s" % (url, error))
+
+    @property
+    def admin_url(self):
+        return urljoin(self.main_url, 'admin/%s' % (self.name,))
 
     def __parse_status_content(self, content):
         if not content:
