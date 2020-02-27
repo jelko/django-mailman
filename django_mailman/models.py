@@ -1,15 +1,46 @@
 # -*- coding: utf-8 -*-
-import re
-import urllib2
+import re, sys
+from future.standard_library import install_aliases
+install_aliases()
+from urllib.parse import urlparse, urlencode
+from urllib.request import urlopen, build_opener
+from urllib.error import HTTPError
+try:
+    unicode('')
+except NameError:
+    unicode = str
+
 import logging
-from types import UnicodeType
 
 from django.db import models
 from django.utils.translation import ugettext_lazy as _
 
-from webcall import MultipartPostHandler
+from .webcall import MultipartPostHandler
 
 logger = logging.getLogger(__name__)
+
+# adding custom exceptions to deal with cases differently
+
+class MailmanException(Exception):
+    pass
+
+class MailmanWarning(MailmanException):
+    pass
+
+class AlreadyAMemberException(MailmanWarning):
+    pass
+
+class NotAMemberException(MailmanWarning):
+    pass
+
+# You can find all local translations in the Mailman Repository in the messages folder
+# https://bazaar.launchpad.net/~mailman-coders/mailman/2.1/view/head:/messages/
+
+ALREADY_A_MEMBER_MSG = (
+    u'Already a member', # en
+    u'Bereits Mitglied', # de
+    u'Déjà abonné', # fr
+)
 
 # Mailman-Messages for a successfull subscription
 SUBSCRIBE_MSG = (
@@ -96,11 +127,28 @@ UNSUBSCRIBE_DATA = {
 }
 
 def check_encoding(value, encoding):
-    if isinstance(value, UnicodeType) and encoding != 'utf-8':
-        value = value.encode(encoding)
-    if not isinstance(value, UnicodeType) and encoding == 'utf-8':
-        value = unicode(value, errors='replace')
-    return value
+    try:
+        # use original function if we are running python 2
+        from types import UnicodeType
+        if isinstance(value, UnicodeType) and encoding != 'utf-8':
+            value = value.encode(encoding)
+        if not isinstance(value, UnicodeType) and encoding == 'utf-8':
+            value = unicode(value, errors='replace')
+        return value
+    except ImportError:
+        # ignore re-encoding and checking entirely when we are running python 3 with native unicode strings
+        return value
+
+def decode_str(string, encoding):
+    # added helper function to remove old Python 2 dependencies
+    # keeping it backwards compatible
+
+    try:
+        return string.decode(encoding=encoding)
+    except AttributeError:
+        # FIXME this two way conversion is stupid
+        # TODO check if works in Python 2
+        return str(bytes(string, encoding=encoding), encoding=encoding)
 
 
 class List(models.Model):
@@ -135,11 +183,17 @@ class List(models.Model):
         m = re.search('(?<=<ul>\n<li>).+(?=\n</ul>\n)', content)
         if m:
             member = m.group(0)
+            # try separate member status message from member info
+            # see source for details: https://bazaar.launchpad.net/~mailman-coders/mailman/2.1/view/head:/Mailman/Cgi/admin.py#L1228
+            try:
+                member = member.split(" -- ")[1].strip()
+            except IndexError:
+                pass
         else:
             raise Exception('Could not find member-information')
 
-        msg = msg.decode(self.encoding)
-        member = member.decode(self.encoding)
+        msg = decode_str(msg, self.encoding)
+        member = decode_str(member, self.encoding)
         return (msg, member)
 
     def __parse_member_content(self, content, encoding='iso-8859-1'):
@@ -153,8 +207,8 @@ class List(models.Model):
             info = member.split('" ')
             email = re.search('(?<=name=").+(?=_realname)', info[0]).group(0)
             realname = re.search('(?<=value=").*', info[2]).group(0)
-            email = unicode(email, encoding)
-            realname = unicode(realname, encoding)
+            email = decode_str(email, encoding)
+            realname = decode_str(realname, encoding)
             members.append([realname, email])
         letters = set(letters)
         return (letters, members, chunks)
@@ -164,7 +218,7 @@ class List(models.Model):
                                               self.password)
 
     def subscribe(self, email, first_name=u'', last_name=u''):
-        from email.Utils import formataddr
+        from email.utils import formataddr
 
         url = '%s/admin/%s/members/add' % (self.main_url, self.name)
 
@@ -175,13 +229,18 @@ class List(models.Model):
 
         SUBSCRIBE_DATA['adminpw'] = self.password
         SUBSCRIBE_DATA['subscribees_upload'] = formataddr([name.strip(), email])
-        opener = urllib2.build_opener(MultipartPostHandler(self.encoding, True))
-        content = opener.open(url, SUBSCRIBE_DATA).read()
+        encoded_data = urlencode(SUBSCRIBE_DATA).encode(self.encoding)
+        opener = build_opener(MultipartPostHandler(self.encoding, True))
 
-        (msg, member) = self.__parse_status_content(unicode(content, self.encoding))
-        if (msg not in SUBSCRIBE_MSG):
+        content = opener.open(url, encoded_data).read()
+
+        (msg, member) = self.__parse_status_content(decode_str(content, self.encoding))
+        if msg not in SUBSCRIBE_MSG:
             error = u'%s: %s' % (msg, member)
-            raise Exception(error.encode(self.encoding))
+            print(member)
+            if member in ALREADY_A_MEMBER_MSG:
+                raise AlreadyAMemberException(error.encode(self.encoding))
+            raise MailmanException(error.encode(self.encoding))
 
     def unsubscribe(self, email):
         url = '%s/admin/%s/members/remove' % (self.main_url, self.name)
@@ -189,23 +248,28 @@ class List(models.Model):
         email = check_encoding(email, self.encoding)
         UNSUBSCRIBE_DATA['adminpw'] = self.password
         UNSUBSCRIBE_DATA['unsubscribees_upload'] = email
-        opener = urllib2.build_opener(MultipartPostHandler(self.encoding))
-        content = opener.open(url, UNSUBSCRIBE_DATA).read()
+        opener = build_opener(MultipartPostHandler(self.encoding))
+        encoded_data = urlencode(UNSUBSCRIBE_DATA).encode(self.encoding)
+        content = opener.open(url, encoded_data).read()
 
-        (msg, member) = self.__parse_status_content(content)
-        if (msg not in UNSUBSCRIBE_MSG) and (msg not in NON_MEMBER_MSG):
+        (msg, member) = self.__parse_status_content(decode_str(content, self.encoding))
+        if (msg not in UNSUBSCRIBE_MSG):
             error = u'%s: %s' % (msg, member)
-            raise Exception(error.encode(self.encoding))
+            if msg not in NON_MEMBER_MSG:
+                raise NotAMemberException(error.encode(self.encoding))
+            raise MailmanException(error.encode(self.encoding))
 
     def get_all_members(self):
         url = '%s/admin/%s/members/list' % (self.main_url, self.name)
         data = { 'adminpw': self.password }
-        opener = urllib2.build_opener(MultipartPostHandler(self.encoding))
+        opener = build_opener(MultipartPostHandler(self.encoding))
 
         all_members = []
+        encoded_data = urlencode(data).encode(self.encoding)
         try:
-            content = opener.open(url, data).read()
-        except urllib2.HTTPError as error:
+            content = opener.open(url, encoded_data).read()
+            content = content.decode(self.encoding)
+        except HTTPError as error:
             logger.error("%s %s" % (error, url))
             return []
     
@@ -213,12 +277,12 @@ class List(models.Model):
         all_members.extend(members)
         for letter in letters:
             url_letter = u"%s?%s" %(url, letter)
-            content = opener.open(url_letter, data).read()
+            content = opener.open(url_letter, encoded_data).read()
             (letters, members, chunks) = self.__parse_member_content(content, self.encoding)
             all_members.extend(members)
             for chunk in chunks[1:]:
                 url_letter_chunk = "%s?%s&%s" %(url, letter, chunk)
-                content = opener.open(url_letter_chunk, data).read()
+                content = opener.open(url_letter_chunk, encoded_data).read()
                 (letters, members, chunks) = self.__parse_member_content(content, self.encoding)
                 all_members.extend(members)
 
@@ -245,13 +309,14 @@ class List(models.Model):
         SUBSCRIBE_DATA['pw-conf'] = password
         SUBSCRIBE_DATA['fullname'] = name
         SUBSCRIBE_DATA['language'] = language
-        opener = urllib2.build_opener(MultipartPostHandler(self.encoding, True))
-        request = opener.open(url, SUBSCRIBE_DATA)
+        opener = build_opener(MultipartPostHandler(self.encoding, True))
+        encoded_data = urlencode(SUBSCRIBE_DATA).encode(self.encoding)
+        request = opener.open(url, encoded_data)
         content = request.read()
         for status in SUBSCRIBE_MSG:
             if len(re.findall(status, content)) > 0:
                 return True
-        raise Exception(content)
+        raise MailmanException(content)
 
     def user_subscribe(self, email, password, language='fr', first_name=u'', last_name=u''):
 
@@ -268,8 +333,9 @@ class List(models.Model):
         SUBSCRIBE_DATA['pw-conf'] = password
         SUBSCRIBE_DATA['fullname'] = name
         SUBSCRIBE_DATA['language'] = language
-        opener = urllib2.build_opener(MultipartPostHandler(self.encoding, True))
-        request = opener.open(url, SUBSCRIBE_DATA)
+        opener = build_opener(MultipartPostHandler(self.encoding, True))
+        encoded_data = urlencode(SUBSCRIBE_DATA).encode(self.encoding)
+        request = opener.open(url, encoded_data)
         content = request.read()
         # no error code to process
 
@@ -283,7 +349,8 @@ class List(models.Model):
         UNSUBSCRIBE_DATA['language'] = language
         UNSUBSCRIBE_DATA['login-unsub'] = UNSUBSCRIBE_BUTTON[language]
         
-        opener = urllib2.build_opener(MultipartPostHandler(self.encoding, True))
-        request = opener.open(url, UNSUBSCRIBE_DATA)
+        opener = build_opener(MultipartPostHandler(self.encoding, True))
+        encoded_data = urlencode(UNSUBSCRIBE_DATA).encode(self.encoding)
+        request = opener.open(url, encoded_data)
         content = request.read()
         # no error code to process
