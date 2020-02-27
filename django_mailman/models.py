@@ -207,6 +207,8 @@ class List(models.Model):
                                               self.password)
 
     def subscribe(self, email, first_name=u'', last_name=u''):
+        if email is '':
+            return
         from email.utils import formataddr
 
         url = '%s/admin/%s/members/add' % (self.main_url, self.name)
@@ -232,6 +234,8 @@ class List(models.Model):
             raise MailmanException(error.encode(self.encoding))
 
     def unsubscribe(self, email):
+        if email is '':
+            return
         url = '%s/admin/%s/members/remove' % (self.main_url, self.name)
 
         email = check_encoding(email, self.encoding)
@@ -284,7 +288,8 @@ class List(models.Model):
         return all_members
 
     def user_subscribe(self, email, password, language='fr', first_name=u'', last_name=u''):
-
+        if email is '':
+            return
         url = '%s/subscribe/%s' % (self.main_url, self.name)
 
         password = check_encoding(password, self.encoding)
@@ -308,7 +313,8 @@ class List(models.Model):
         raise MailmanException(content)
 
     def user_subscribe(self, email, password, language='fr', first_name=u'', last_name=u''):
-
+        if email is '':
+            return
         url = '%s/subscribe/%s' % (self.main_url, self.name)
 
         password = check_encoding(password, self.encoding)
@@ -329,7 +335,8 @@ class List(models.Model):
         # no error code to process
 
     def user_unsubscribe(self, email, language='fr'):
-
+        if email is '':
+            return
         url = '%s/options/%s/%s' % (self.main_url, self.name, email)
 
         email = check_encoding(email, self.encoding)
