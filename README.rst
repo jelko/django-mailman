@@ -10,6 +10,7 @@ Requirements
 It's possible that mailman also works with the 2.1.x series, but I guess it wouldn't work with the 3.x series which is under development at the moment
 
 `django-mailman` requires Django 1.4 or later.
+`django-mailman` is now compatible with Python 3 and was tested with Django 2.2.10.
 
 Configuration
 =============
